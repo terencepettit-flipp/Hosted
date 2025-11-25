@@ -83,8 +83,13 @@
         place-items: center;
         background: rgba(255,255,255,0.04);
         transition: transform 180ms ease;
+
+        transform: rotate(180deg); /* default */
       }
-      details[open] .chev { transform: rotate(180deg); }
+
+      details[open] .chev {
+        transform: rotate(0deg); /* when expanded */
+      }
 
       .controls-body {
         padding: 0 16px 16px 16px;
