@@ -83,13 +83,8 @@
         place-items: center;
         background: rgba(255,255,255,0.04);
         transition: transform 180ms ease;
-
-        transform: rotate(180deg); /* default */
       }
-
-      details[open] .chev {
-        transform: rotate(0deg); /* when expanded */
-      }
+      details[open] .chev { transform: rotate(180deg); }
 
       .controls-body {
         padding: 0 16px 16px 16px;
@@ -126,22 +121,6 @@
         outline: none;
       }
       input:focus {
-        border-color: rgba(104, 156, 255, 0.55);
-        box-shadow: 0 0 0 4px rgba(104, 156, 255, 0.16);
-      }
-
-      /* Select styling to match inputs */
-      select {
-        width: 100%;
-        padding: 12px 12px;
-        border-radius: 14px;
-        border: 1px solid var(--border);
-        background: rgba(0, 0, 0, 0.18);
-        color: var(--text);
-        outline: none;
-        appearance: none;
-      }
-      select:focus {
         border-color: rgba(104, 156, 255, 0.55);
         box-shadow: 0 0 0 4px rgba(104, 156, 255, 0.16);
       }
@@ -209,8 +188,11 @@
       .dot.ok { background: rgba(88, 255, 170, 0.7); }
       .dot.err { background: rgba(255, 110, 110, 0.8); }
 
-      .main-body { padding: 12px; }
+      .main-body {
+        padding: 12px;
+      }
 
+      /* This div is where Flipp.Storefront renders */
       #flipp-container {
         min-height: 70vh;
         background: rgba(0, 0, 0, 0.12);
@@ -232,27 +214,13 @@
         <summary>
           <div class="summary-left">
             <div class="title">Parameters</div>
-            <div class="subtitle">Select a merchant or enter values, then click Render</div>
+            <div class="subtitle">Set merchant values, then click Render</div>
           </div>
           <div class="chev" aria-hidden="true">⌃</div>
         </summary>
 
         <div class="controls-body">
-          <!-- Merchant dropdown + helper text -->
           <div class="grid">
-            <div class="field wide">
-              <label for="merchantPreset">Select a merchant:</label>
-              <select id="merchantPreset">
-                <option value="">— Select —</option>
-                <option value="toysrus_ca">Toys R Us Canada</option>
-                <option value="bmr">BMR</option>
-              </select>
-            </div>
-
-            <div class="field wide">
-              <div class="hint" style="margin-top: 4px;">Or enter parameters manually:</div>
-            </div>
-
             <div class="field">
               <label for="merchantId">Merchant ID</label>
               <input id="merchantId" inputmode="numeric" placeholder="e.g. 6737" />
@@ -339,41 +307,17 @@
         });
       }
 
+      // Recreate container to force a clean render without relying on SDK-specific teardown APIs
       function resetFlippContainer() {
+        const parent = document.querySelector(".main-body");
         const old = document.getElementById("flipp-container");
         const fresh = document.createElement("div");
         fresh.id = "flipp-container";
-        // Keep the same styling as before by reusing the id selector
         old.replaceWith(fresh);
         return fresh;
       }
 
-      // ---------- Presets (easy to extend) ----------
-      // Add a new entry here AND add a matching <option value="key">Name</option> above.
-      const MERCHANT_PRESETS = {
-        toysrus_ca: {
-          label: "Toys R Us Canada",
-          merchantId: "246",
-          merchantNameIdentifier: "toysruscanada",
-          accessToken: "1ddfda9d56236c47ae8fbcd9f508ced1",
-        },
-        bmr: {
-          label: "BMR",
-          merchantId: "2157",
-          merchantNameIdentifier: "bmr",
-          accessToken: "94eb9935d1ff4e401784072522d789a3",
-        },
-      };
-
-      function applyPreset(presetKey) {
-        const preset = MERCHANT_PRESETS[presetKey];
-        if (!preset) return;
-        document.getElementById("merchantId").value = preset.merchantId;
-        document.getElementById("merchantNameIdentifier").value = preset.merchantNameIdentifier;
-        document.getElementById("accessToken").value = preset.accessToken;
-      }
-
-      // ---------- Your delegates ----------
+      // ---------- Your delegates (same as your sample, with a small fix) ----------
       function getCustomElements(item) {
         console.log("customElements Item clicked on: ", item.sku);
         return {
@@ -381,7 +325,7 @@
             {
               type: "img",
               text: "SLOT 2 IMAGE",
-              src: "https://i.pinimg.com/originals/ee/42/d9/ee42d91ece376e6847f6941b72269c76.gif",
+              src: "https://i.pinimg.com/originals/64/a6/79/64a679f63aca3316466b10448dec73e6.gif",
             },
           ],
         };
@@ -435,11 +379,11 @@
 
         if (!merchantId || !merchantNameIdentifier || !accessToken) {
           setStatus("err", "Missing required inputs");
-          hint.textContent = "Fill all three fields (or pick a preset).";
+          hint.textContent = "Fill all three fields.";
           return;
         }
 
-        // Push values into the URL (so the query-string pattern applies)
+        // Push values into the URL (so your original query-string pattern still applies)
         const shareUrl = setQueryParams({ accessToken, merchantId, merchantNameIdentifier });
 
         setStatus("", "Loading SDK…");
@@ -457,6 +401,7 @@
         const flippContainer = resetFlippContainer();
 
         try {
+          // This mirrors your “load + query params” logic, but uses the current URL we just updated.
           const storefront = new Flipp.Storefront({
             accessToken: getQueryParam("accessToken", accessToken),
             merchantId: getQueryParam("merchantId", merchantId),
@@ -484,9 +429,7 @@
           storefront.renderStorefront(flippContainer);
 
           setStatus("ok", "Rendered");
-          hint.textContent = "URL updated with current params.";
-          // eslint-disable-next-line no-unused-vars
-          void shareUrl;
+          hint.textContent = `URL updated. (${shareUrl})`;
         } catch (e) {
           console.error(e);
           setStatus("err", "Render failed");
@@ -496,31 +439,16 @@
 
       // ---------- Init ----------
       window.addEventListener("load", () => {
-        const presetSelect = document.getElementById("merchantPreset");
-
-        // 1) If all three query params exist, use them (shareable URLs).
-        // 2) Otherwise, default to blank fields (user picks preset or types manually).
-        const qpMerchantId = getQueryParam("merchantId", "");
-        const qpMerchantNameIdentifier = getQueryParam("merchantNameIdentifier", "");
-        const qpAccessToken = getQueryParam("accessToken", "");
-
-        document.getElementById("merchantId").value = qpMerchantId;
-        document.getElementById("merchantNameIdentifier").value = qpMerchantNameIdentifier;
-        document.getElementById("accessToken").value = qpAccessToken;
-
-        // Auto-select preset if query params exactly match one
-        const matchKey = Object.keys(MERCHANT_PRESETS).find((k) => {
-          const p = MERCHANT_PRESETS[k];
-          return (
-            p.merchantId === qpMerchantId &&
-            p.merchantNameIdentifier === qpMerchantNameIdentifier &&
-            p.accessToken === qpAccessToken
-          );
-        });
-        if (matchKey) presetSelect.value = matchKey;
-
-        // Changing preset fills inputs (does NOT auto-render; click Render)
-        presetSelect.addEventListener("change", () => applyPreset(presetSelect.value));
+        // Prefill fields from query params (or your defaults)
+        document.getElementById("accessToken").value = getQueryParam(
+          "accessToken",
+          "f2a3a3d8824b786a87fe4a826d9de3f6"
+        );
+        document.getElementById("merchantId").value = getQueryParam("merchantId", "6737");
+        document.getElementById("merchantNameIdentifier").value = getQueryParam(
+          "merchantNameIdentifier",
+          "liquormart"
+        );
 
         document.getElementById("renderBtn").addEventListener("click", renderStorefrontFromInputs);
 
@@ -547,12 +475,8 @@
           }
         });
 
-        // If query params are present, auto-render
-        if (qpMerchantId && qpMerchantNameIdentifier && qpAccessToken) {
-          renderStorefrontFromInputs();
-        } else {
-          setStatus("", "Idle");
-        }
+        // Auto-render once on load (comment this out if you want manual-only)
+        renderStorefrontFromInputs();
       });
     </script>
   </body>
