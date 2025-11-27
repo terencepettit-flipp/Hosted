@@ -484,18 +484,108 @@
   if (window.__netwatchInstalled) return;
   window.__netwatchInstalled = true;
 
+  // ---------------- Config ----------------
   const MAX_ROWS = 200;
-  const state = { items: [], paused: false };
 
-  // ---------- UI ----------
+  // ---------------- State ----------------
+  let seq = 0;
+  /** @type {Map<number, any>} */
+  const records = new Map();
+  const state = { paused: false };
+
+  // ---------------- Helpers ----------------
+  const toAbsUrl = (u) => {
+    try { return new URL(String(u), location.href).href; } catch { return String(u); }
+  };
+
+  const isPlainObject = (v) => Object.prototype.toString.call(v) === "[object Object]";
+
+  const safeStringify = (v) => {
+    try {
+      if (typeof v === "string") return v;
+      if (v == null) return "";
+      return JSON.stringify(v, null, 2);
+    } catch {
+      try { return String(v); } catch { return "[unprintable]"; }
+    }
+  };
+
+  const describeBody = async (body) => {
+    // Best-effort without breaking requests (don’t consume streams).
+    if (body == null) return null;
+
+    // Strings are easy
+    if (typeof body === "string") return body;
+
+    // URLSearchParams
+    if (typeof URLSearchParams !== "undefined" && body instanceof URLSearchParams) {
+      return body.toString();
+    }
+
+    // FormData
+    if (typeof FormData !== "undefined" && body instanceof FormData) {
+      const parts = [];
+      for (const [k, v] of body.entries()) {
+        if (typeof File !== "undefined" && v instanceof File) {
+          parts.push(`${k} = [File name="${v.name}", type="${v.type || "unknown"}", size=${v.size}]`);
+        } else {
+          parts.push(`${k} = ${String(v)}`);
+        }
+      }
+      return parts.join("\n");
+    }
+
+    // Blob
+    if (typeof Blob !== "undefined" && body instanceof Blob) {
+      // Don't read huge blobs; give summary + small sniff
+      const size = body.size;
+      const type = body.type || "unknown";
+      if (size <= 256 * 1024) {
+        try { return await body.text(); } catch { /* fallthrough */ }
+      }
+      return `[Blob type="${type}", size=${size}]`;
+    }
+
+    // ArrayBuffer / TypedArray
+    if (body instanceof ArrayBuffer) return `[ArrayBuffer byteLength=${body.byteLength}]`;
+    if (ArrayBuffer.isView && ArrayBuffer.isView(body)) return `[TypedArray byteLength=${body.byteLength}]`;
+
+    // Request (only if you explicitly pass a Request as body, rare)
+    if (typeof Request !== "undefined" && body instanceof Request) {
+      try { return await body.clone().text(); } catch { return "[Request body not readable]"; }
+    }
+
+    // ReadableStream or unknown object
+    if (typeof ReadableStream !== "undefined" && body instanceof ReadableStream) {
+      return "[stream body not captured]";
+    }
+
+    // Plain objects
+    if (isPlainObject(body)) return safeStringify(body);
+
+    // Fallback
+    try { return String(body); } catch { return "[unprintable body]"; }
+  };
+
+  const describeResponseBody = async (resp) => {
+    // Try text; if binary-ish, we still show a short note.
+    try {
+      const ct = resp.headers && resp.headers.get ? (resp.headers.get("content-type") || "") : "";
+      // If it's obviously binary, don't force huge text; still try (it might be JSON without CT).
+      const txt = await resp.clone().text();
+      return txt.length ? txt : null;
+    } catch {
+      return null;
+    }
+  };
+
+  // ---------------- UI: main list panel ----------------
   const panel = document.createElement("div");
-  panel.setAttribute("role", "region");
-
   panel.style.cssText = `
     position: fixed; right: 12px; bottom: 12px;
     width: min(720px, calc(100vw - 24px));
     height: min(55vh, 420px);
-    min-width: 320px;
+    min-width: 340px;
     min-height: 180px;
     z-index: 2147483647;
     background: rgba(20,20,22,0.92);
@@ -506,8 +596,6 @@
     overflow: hidden;
     font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
     backdrop-filter: blur(8px);
-
-    /* ✅ resizable */
     resize: both;
   `;
 
@@ -518,6 +606,7 @@
     border-bottom: 1px solid rgba(255,255,255,0.12);
     background: rgba(255,255,255,0.03);
     user-select: none;
+    cursor: move;
   `;
 
   const title = document.createElement("div");
@@ -553,10 +642,6 @@
   controls.append(pauseBtn, clearBtn, closeBtn);
   header.append(title, controls);
 
-  // Use absolute layout so body always fits panel, even when resized.
-  panel.style.position = "fixed";
-  panel.style.display = "block";
-
   const body = document.createElement("div");
   body.style.cssText = `
     height: calc(100% - 40px);
@@ -576,8 +661,7 @@
   panel.append(header, body);
   document.documentElement.appendChild(panel);
 
-  // Drag (still works) — note: when resizing, you’ll use the bottom-right handle
-  header.style.cursor = "move";
+  // Drag main panel
   let drag = null;
   header.addEventListener("mousedown", (e) => {
     if (e.target.tagName === "BUTTON") return;
@@ -600,72 +684,329 @@
     pauseBtn.textContent = state.paused ? "Resume" : "Pause";
   };
   clearBtn.onclick = () => {
-    state.items = [];
+    records.clear();
     list.innerHTML = "";
   };
   closeBtn.onclick = () => panel.remove();
 
-  function addUrl(url) {
-    try { url = String(url); } catch { return; }
-    if (!url || state.paused) return;
+  // ---------------- Details window ----------------
+  const openDetailWindow = (recId) => {
+    const rec = records.get(recId);
+    if (!rec) return;
 
-    state.items.push(url);
-    if (state.items.length > MAX_ROWS) state.items.splice(0, state.items.length - MAX_ROWS);
+    const win = document.createElement("div");
+    win.style.cssText = `
+      position: fixed; left: 14px; top: 14px;
+      width: min(780px, calc(100vw - 28px));
+      height: min(65vh, 520px);
+      min-width: 360px;
+      min-height: 220px;
+      z-index: 2147483647;
+      background: rgba(18,18,20,0.94);
+      color: #eaeaea;
+      border: 1px solid rgba(255,255,255,0.14);
+      border-radius: 14px;
+      box-shadow: 0 12px 36px rgba(0,0,0,0.55);
+      overflow: hidden;
+      font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      backdrop-filter: blur(8px);
+      resize: both;
+    `;
+
+    const h = document.createElement("div");
+    h.style.cssText = `
+      display:flex; align-items:center; justify-content:space-between;
+      gap: 10px;
+      padding: 8px 10px;
+      border-bottom: 1px solid rgba(255,255,255,0.12);
+      background: rgba(255,255,255,0.03);
+      user-select: none;
+      cursor: move;
+    `;
+
+    const t = document.createElement("div");
+    t.textContent = rec.url;
+    t.title = rec.url;
+    t.style.cssText = `
+      font-weight: 700;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      flex: 1;
+      min-width: 0;
+    `;
+
+    const close = mkBtn("×");
+    close.style.cssText += `font-weight:900; width: 30px; padding: 2px 0;`;
+    h.append(t, close);
+
+    const tabs = document.createElement("div");
+    tabs.style.cssText = `
+      display:flex; gap: 6px;
+      padding: 8px 10px;
+      border-bottom: 1px solid rgba(255,255,255,0.12);
+    `;
+
+    const tabBtn = (label) => {
+      const b = mkBtn(label);
+      b.style.cssText += `
+        padding: 6px 10px;
+        border-radius: 999px;
+      `;
+      return b;
+    };
+
+    const reqTab = tabBtn("Request");
+    const resTab = tabBtn("Response");
+    tabs.append(reqTab, resTab);
+
+    const contentWrap = document.createElement("div");
+    contentWrap.style.cssText = `
+      height: calc(100% - 40px - 43px);
+      overflow: auto;
+      padding: 10px;
+    `;
+
+    const pre = document.createElement("pre");
+    pre.style.cssText = `
+      margin:0;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    `;
+    contentWrap.appendChild(pre);
+
+    win.append(h, tabs, contentWrap);
+    document.documentElement.appendChild(win);
+
+    // Drag details window
+    let d2 = null;
+    h.addEventListener("mousedown", (e) => {
+      if (e.target.tagName === "BUTTON") return;
+      d2 = { x: e.clientX, y: e.clientY, r: win.getBoundingClientRect() };
+      e.preventDefault();
+    });
+    window.addEventListener("mousemove", (e) => {
+      if (!d2) return;
+      const dx = e.clientX - d2.x;
+      const dy = e.clientY - d2.y;
+      win.style.left = `${Math.max(8, d2.r.left + dx)}px`;
+      win.style.top = `${Math.max(8, d2.r.top + dy)}px`;
+    });
+    window.addEventListener("mouseup", () => { d2 = null; });
+
+    close.onclick = () => win.remove();
+
+    const setActive = (which) => {
+      const activeCss = `background: rgba(255,255,255,0.16); border-color: rgba(255,255,255,0.26);`;
+      const normalCss = `background: rgba(255,255,255,0.06); border-color: rgba(255,255,255,0.18);`;
+
+      reqTab.style.cssText = reqTab.style.cssText.replace(activeCss, "").replace(normalCss, "");
+      resTab.style.cssText = resTab.style.cssText.replace(activeCss, "").replace(normalCss, "");
+
+      if (which === "request") {
+        reqTab.style.cssText += activeCss;
+        resTab.style.cssText += normalCss;
+        const rb = rec.requestBody ? rec.requestBody : "no request body";
+        pre.textContent = rb;
+      } else {
+        resTab.style.cssText += activeCss;
+        reqTab.style.cssText += normalCss;
+
+        const statusLine = (typeof rec.status === "number") ? `Status: ${rec.status}` : "Status: (pending)";
+        const errLine = rec.error ? `\nError: ${rec.error}` : "";
+        const respBody = rec.responseBody ? rec.responseBody : "no response body";
+        pre.textContent = `${statusLine}${errLine}\n\n${respBody}`;
+      }
+    };
+
+    reqTab.onclick = () => setActive("request");
+    resTab.onclick = () => setActive("response");
+
+    // Default tab
+    setActive("request");
+
+    // Live updating if response arrives after window opened
+    const interval = setInterval(() => {
+      if (!document.body.contains(win)) { clearInterval(interval); return; }
+      const latest = records.get(recId);
+      if (!latest) return;
+      // Update title (in case URL normalized later)
+      t.textContent = latest.url;
+      t.title = latest.url;
+      // If currently showing response, re-render.
+      // Heuristic: check which tab has active background
+      const showingResponse = resTab.style.cssText.includes("rgba(255,255,255,0.16)");
+      if (showingResponse) {
+        const statusLine = (typeof latest.status === "number") ? `Status: ${latest.status}` : "Status: (pending)";
+        const errLine = latest.error ? `\nError: ${latest.error}` : "";
+        const respBody = latest.responseBody ? latest.responseBody : "no response body";
+        pre.textContent = `${statusLine}${errLine}\n\n${respBody}`;
+      }
+    }, 250);
+  };
+
+  // ---------------- List inserts ----------------
+  const addRecordToList = (rec) => {
+    if (state.paused) return;
 
     const li = document.createElement("li");
-    li.textContent = url;
-    li.title = "Click to copy";
+    li.textContent = rec.url;
+    li.title = "Click for details (request/response).";
     li.style.cssText = `
-      /* ✅ show full URL when panel is wider; wrap when it's narrow */
       white-space: normal;
       overflow-wrap: anywhere;
       word-break: break-word;
       opacity: 0.95;
-      cursor: copy;
+      cursor: pointer;
+      padding: 4px 6px;
+      border-radius: 10px;
+      border: 1px solid rgba(255,255,255,0.10);
+      background: rgba(255,255,255,0.03);
     `;
-
-    li.onclick = async () => {
-      try {
-        await navigator.clipboard.writeText(url);
-        li.style.opacity = "0.55";
-        setTimeout(() => (li.style.opacity = "0.95"), 250);
-      } catch {}
-    };
+    li.onmouseenter = () => (li.style.background = "rgba(255,255,255,0.06)");
+    li.onmouseleave = () => (li.style.background = "rgba(255,255,255,0.03)");
+    li.onclick = () => openDetailWindow(rec.id);
 
     list.appendChild(li);
     while (list.children.length > MAX_ROWS) list.removeChild(list.firstChild);
     body.scrollTop = body.scrollHeight;
-  }
+  };
 
-  // ---------- Hook fetch ----------
+  const createRecord = (url, kind) => {
+    const id = ++seq;
+    const rec = {
+      id,
+      kind, // "fetch" | "xhr"
+      url: toAbsUrl(url),
+      requestBody: null,
+      status: undefined,
+      responseBody: null,
+      error: null
+    };
+    records.set(id, rec);
+
+    // Cap memory
+    if (records.size > MAX_ROWS * 3) {
+      const oldest = Math.min(...records.keys());
+      records.delete(oldest);
+    }
+
+    addRecordToList(rec);
+    return rec;
+  };
+
+  // ---------------- Hook fetch ----------------
   const origFetch = window.fetch;
   if (typeof origFetch === "function") {
     window.fetch = function(input, init) {
+      let url;
       try {
-        const url = (input && typeof input === "object" && "url" in input) ? input.url : input;
-        addUrl(url);
-      } catch {}
-      return origFetch.apply(this, arguments);
+        url = (input && typeof input === "object" && "url" in input) ? input.url : input;
+      } catch {
+        url = "[unknown fetch url]";
+      }
+
+      const rec = createRecord(url, "fetch");
+
+      // Capture request body best-effort without consuming streams
+      (async () => {
+        try {
+          // If caller passed init.body, prefer that:
+          if (init && "body" in init) {
+            rec.requestBody = await describeBody(init.body);
+            return;
+          }
+          // If caller passed a Request object, try clone().text() (can still fail)
+          if (typeof Request !== "undefined" && input instanceof Request) {
+            try {
+              const cloned = input.clone();
+              const txt = await cloned.text();
+              rec.requestBody = txt || null;
+            } catch {
+              rec.requestBody = null;
+            }
+          }
+        } catch {
+          rec.requestBody = null;
+        }
+      })();
+
+      return origFetch.apply(this, arguments).then(async (resp) => {
+        try {
+          rec.status = resp.status;
+          rec.responseBody = await describeResponseBody(resp);
+        } catch {
+          // ignore
+        }
+        return resp;
+      }).catch((err) => {
+        rec.error = (err && err.message) ? err.message : String(err);
+        throw err;
+      });
     };
   }
 
-  // ---------- Hook XHR ----------
+  // ---------------- Hook XHR ----------------
   const origOpen = XMLHttpRequest.prototype.open;
+  const origSend = XMLHttpRequest.prototype.send;
+
   XMLHttpRequest.prototype.open = function(method, url) {
-    try { addUrl(url); } catch {}
+    // Attach record to this XHR instance
+    try {
+      this.__netwatch_rec = createRecord(url, "xhr");
+      this.__netwatch_rec.method = method;
+    } catch {}
     return origOpen.apply(this, arguments);
   };
 
-  // Optional: capture sendBeacon too
-  if (navigator.sendBeacon) {
-    const origBeacon = navigator.sendBeacon.bind(navigator);
-    navigator.sendBeacon = function(url, data) {
-      try { addUrl(url); } catch {}
-      return origBeacon(url, data);
-    };
-  }
+  XMLHttpRequest.prototype.send = function(body) {
+    const rec = this.__netwatch_rec;
+
+    (async () => {
+      if (!rec) return;
+      try { rec.requestBody = await describeBody(body); } catch { rec.requestBody = null; }
+    })();
+
+    if (rec) {
+      const xhr = this;
+      const done = () => {
+        try {
+          rec.status = xhr.status;
+
+          // responseType "" or "text" => responseText
+          if (!xhr.responseType || xhr.responseType === "text") {
+            const txt = xhr.responseText;
+            rec.responseBody = (txt && String(txt).length) ? String(txt) : null;
+          } else {
+            // Try to stringify other response types
+            const r = xhr.response;
+            if (r == null) rec.responseBody = null;
+            else if (typeof r === "string") rec.responseBody = r || null;
+            else if (r instanceof ArrayBuffer) rec.responseBody = `[ArrayBuffer byteLength=${r.byteLength}]`;
+            else if (typeof Blob !== "undefined" && r instanceof Blob) rec.responseBody = `[Blob type="${r.type || "unknown"}", size=${r.size}]`;
+            else rec.responseBody = safeStringify(r);
+          }
+        } catch (e) {
+          rec.error = (e && e.message) ? e.message : String(e);
+        }
+      };
+
+      // Make sure we only bind once
+      if (!xhr.__netwatch_bound) {
+        xhr.__netwatch_bound = true;
+        xhr.addEventListener("loadend", done);
+        xhr.addEventListener("error", () => { if (rec) rec.error = rec.error || "XHR error"; });
+        xhr.addEventListener("abort", () => { if (rec) rec.error = rec.error || "XHR aborted"; });
+      }
+    }
+
+    return origSend.apply(this, arguments);
+  };
+
 })();
 </script>
+
 
   </body>
 </html>
