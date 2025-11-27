@@ -479,9 +479,8 @@
         renderStorefrontFromInputs();
       });
     </script>
-    <script>
+<script>
 (() => {
-  // Avoid double-injecting
   if (window.__netwatchInstalled) return;
   window.__netwatchInstalled = true;
 
@@ -494,8 +493,10 @@
 
   panel.style.cssText = `
     position: fixed; right: 12px; bottom: 12px;
-    width: min(520px, calc(100vw - 24px));
-    height: min(45vh, 380px);
+    width: min(720px, calc(100vw - 24px));
+    height: min(55vh, 420px);
+    min-width: 320px;
+    min-height: 180px;
     z-index: 2147483647;
     background: rgba(20,20,22,0.92);
     color: #eaeaea;
@@ -505,6 +506,9 @@
     overflow: hidden;
     font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
     backdrop-filter: blur(8px);
+
+    /* ✅ resizable */
+    resize: both;
   `;
 
   const header = document.createElement("div");
@@ -513,6 +517,7 @@
     padding: 8px 10px;
     border-bottom: 1px solid rgba(255,255,255,0.12);
     background: rgba(255,255,255,0.03);
+    user-select: none;
   `;
 
   const title = document.createElement("div");
@@ -543,11 +548,14 @@
   const pauseBtn = mkBtn("Pause");
   const clearBtn = mkBtn("Clear");
   const closeBtn = mkBtn("×");
-
   closeBtn.style.cssText += `font-weight: 900; width: 30px; padding: 2px 0;`;
 
   controls.append(pauseBtn, clearBtn, closeBtn);
   header.append(title, controls);
+
+  // Use absolute layout so body always fits panel, even when resized.
+  panel.style.position = "fixed";
+  panel.style.display = "block";
 
   const body = document.createElement("div");
   body.style.cssText = `
@@ -568,7 +576,7 @@
   panel.append(header, body);
   document.documentElement.appendChild(panel);
 
-  // Make it draggable (simple)
+  // Drag (still works) — note: when resizing, you’ll use the bottom-right handle
   header.style.cursor = "move";
   let drag = null;
   header.addEventListener("mousedown", (e) => {
@@ -599,8 +607,7 @@
 
   function addUrl(url) {
     try { url = String(url); } catch { return; }
-    if (!url) return;
-    if (state.paused) return;
+    if (!url || state.paused) return;
 
     state.items.push(url);
     if (state.items.length > MAX_ROWS) state.items.splice(0, state.items.length - MAX_ROWS);
@@ -609,12 +616,14 @@
     li.textContent = url;
     li.title = "Click to copy";
     li.style.cssText = `
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
+      /* ✅ show full URL when panel is wider; wrap when it's narrow */
+      white-space: normal;
+      overflow-wrap: anywhere;
+      word-break: break-word;
       opacity: 0.95;
       cursor: copy;
     `;
+
     li.onclick = async () => {
       try {
         await navigator.clipboard.writeText(url);
@@ -632,7 +641,6 @@
   const origFetch = window.fetch;
   if (typeof origFetch === "function") {
     window.fetch = function(input, init) {
-      // input can be Request or string
       try {
         const url = (input && typeof input === "object" && "url" in input) ? input.url : input;
         addUrl(url);
@@ -648,7 +656,7 @@
     return origOpen.apply(this, arguments);
   };
 
-  // Also capture sendBeacon (optional, but handy)
+  // Optional: capture sendBeacon too
   if (navigator.sendBeacon) {
     const origBeacon = navigator.sendBeacon.bind(navigator);
     navigator.sendBeacon = function(url, data) {
@@ -658,5 +666,6 @@
   }
 })();
 </script>
+
   </body>
 </html>
