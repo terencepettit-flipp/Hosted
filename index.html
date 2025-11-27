@@ -479,23 +479,31 @@
         renderStorefrontFromInputs();
       });
     </script>
-<script>
+
+    <script>
 (() => {
   if (window.__netwatchInstalled) return;
   window.__netwatchInstalled = true;
 
   // ---------------- Config ----------------
   const MAX_ROWS = 200;
+  const IGNORE_URLS = new Set([
+    "https://p.flipp.com/beacons",
+  ]);
 
   // ---------------- State ----------------
   let seq = 0;
-  /** @type {Map<number, any>} */
   const records = new Map();
   const state = { paused: false };
 
   // ---------------- Helpers ----------------
   const toAbsUrl = (u) => {
     try { return new URL(String(u), location.href).href; } catch { return String(u); }
+  };
+
+  const shouldIgnore = (urlLike) => {
+    const abs = toAbsUrl(urlLike);
+    return IGNORE_URLS.has(abs);
   };
 
   const isPlainObject = (v) => Object.prototype.toString.call(v) === "[object Object]";
@@ -511,18 +519,13 @@
   };
 
   const describeBody = async (body) => {
-    // Best-effort without breaking requests (don’t consume streams).
     if (body == null) return null;
-
-    // Strings are easy
     if (typeof body === "string") return body;
 
-    // URLSearchParams
     if (typeof URLSearchParams !== "undefined" && body instanceof URLSearchParams) {
       return body.toString();
     }
 
-    // FormData
     if (typeof FormData !== "undefined" && body instanceof FormData) {
       const parts = [];
       for (const [k, v] of body.entries()) {
@@ -535,43 +538,29 @@
       return parts.join("\n");
     }
 
-    // Blob
     if (typeof Blob !== "undefined" && body instanceof Blob) {
-      // Don't read huge blobs; give summary + small sniff
       const size = body.size;
       const type = body.type || "unknown";
       if (size <= 256 * 1024) {
-        try { return await body.text(); } catch { /* fallthrough */ }
+        try { return await body.text(); } catch {}
       }
       return `[Blob type="${type}", size=${size}]`;
     }
 
-    // ArrayBuffer / TypedArray
     if (body instanceof ArrayBuffer) return `[ArrayBuffer byteLength=${body.byteLength}]`;
     if (ArrayBuffer.isView && ArrayBuffer.isView(body)) return `[TypedArray byteLength=${body.byteLength}]`;
 
-    // Request (only if you explicitly pass a Request as body, rare)
-    if (typeof Request !== "undefined" && body instanceof Request) {
-      try { return await body.clone().text(); } catch { return "[Request body not readable]"; }
-    }
-
-    // ReadableStream or unknown object
     if (typeof ReadableStream !== "undefined" && body instanceof ReadableStream) {
       return "[stream body not captured]";
     }
 
-    // Plain objects
     if (isPlainObject(body)) return safeStringify(body);
 
-    // Fallback
     try { return String(body); } catch { return "[unprintable body]"; }
   };
 
   const describeResponseBody = async (resp) => {
-    // Try text; if binary-ish, we still show a short note.
     try {
-      const ct = resp.headers && resp.headers.get ? (resp.headers.get("content-type") || "") : "";
-      // If it's obviously binary, don't force huge text; still try (it might be JSON without CT).
       const txt = await resp.clone().text();
       return txt.length ? txt : null;
     } catch {
@@ -749,10 +738,7 @@
 
     const tabBtn = (label) => {
       const b = mkBtn(label);
-      b.style.cssText += `
-        padding: 6px 10px;
-        border-radius: 999px;
-      `;
+      b.style.cssText += `padding: 6px 10px; border-radius: 999px;`;
       return b;
     };
 
@@ -801,47 +787,47 @@
       const activeCss = `background: rgba(255,255,255,0.16); border-color: rgba(255,255,255,0.26);`;
       const normalCss = `background: rgba(255,255,255,0.06); border-color: rgba(255,255,255,0.18);`;
 
-      reqTab.style.cssText = reqTab.style.cssText.replace(activeCss, "").replace(normalCss, "");
-      resTab.style.cssText = resTab.style.cssText.replace(activeCss, "").replace(normalCss, "");
+      // reset styles (simple)
+      reqTab.style.background = "rgba(255,255,255,0.06)";
+      reqTab.style.borderColor = "rgba(255,255,255,0.18)";
+      resTab.style.background = "rgba(255,255,255,0.06)";
+      resTab.style.borderColor = "rgba(255,255,255,0.18)";
 
       if (which === "request") {
         reqTab.style.cssText += activeCss;
-        resTab.style.cssText += normalCss;
         const rb = rec.requestBody ? rec.requestBody : "no request body";
         pre.textContent = rb;
+        win.__netwatch_showing = "request";
       } else {
         resTab.style.cssText += activeCss;
-        reqTab.style.cssText += normalCss;
-
         const statusLine = (typeof rec.status === "number") ? `Status: ${rec.status}` : "Status: (pending)";
         const errLine = rec.error ? `\nError: ${rec.error}` : "";
         const respBody = rec.responseBody ? rec.responseBody : "no response body";
         pre.textContent = `${statusLine}${errLine}\n\n${respBody}`;
+        win.__netwatch_showing = "response";
       }
     };
 
     reqTab.onclick = () => setActive("request");
     resTab.onclick = () => setActive("response");
-
-    // Default tab
     setActive("request");
 
-    // Live updating if response arrives after window opened
+    // Live update while open
     const interval = setInterval(() => {
       if (!document.body.contains(win)) { clearInterval(interval); return; }
       const latest = records.get(recId);
       if (!latest) return;
-      // Update title (in case URL normalized later)
+
       t.textContent = latest.url;
       t.title = latest.url;
-      // If currently showing response, re-render.
-      // Heuristic: check which tab has active background
-      const showingResponse = resTab.style.cssText.includes("rgba(255,255,255,0.16)");
-      if (showingResponse) {
+
+      if (win.__netwatch_showing === "response") {
         const statusLine = (typeof latest.status === "number") ? `Status: ${latest.status}` : "Status: (pending)";
         const errLine = latest.error ? `\nError: ${latest.error}` : "";
         const respBody = latest.responseBody ? latest.responseBody : "no response body";
         pre.textContent = `${statusLine}${errLine}\n\n${respBody}`;
+      } else {
+        pre.textContent = latest.requestBody ? latest.requestBody : "no request body";
       }
     }, 250);
   };
@@ -874,11 +860,14 @@
   };
 
   const createRecord = (url, kind) => {
+    const absUrl = toAbsUrl(url);
+    if (IGNORE_URLS.has(absUrl)) return null;
+
     const id = ++seq;
     const rec = {
       id,
       kind, // "fetch" | "xhr"
-      url: toAbsUrl(url),
+      url: absUrl,
       requestBody: null,
       status: undefined,
       responseBody: null,
@@ -907,21 +896,20 @@
         url = "[unknown fetch url]";
       }
 
+      if (shouldIgnore(url)) return origFetch.apply(this, arguments);
+
       const rec = createRecord(url, "fetch");
 
-      // Capture request body best-effort without consuming streams
       (async () => {
+        if (!rec) return;
         try {
-          // If caller passed init.body, prefer that:
           if (init && "body" in init) {
             rec.requestBody = await describeBody(init.body);
             return;
           }
-          // If caller passed a Request object, try clone().text() (can still fail)
           if (typeof Request !== "undefined" && input instanceof Request) {
             try {
-              const cloned = input.clone();
-              const txt = await cloned.text();
+              const txt = await input.clone().text();
               rec.requestBody = txt || null;
             } catch {
               rec.requestBody = null;
@@ -933,15 +921,15 @@
       })();
 
       return origFetch.apply(this, arguments).then(async (resp) => {
-        try {
-          rec.status = resp.status;
-          rec.responseBody = await describeResponseBody(resp);
-        } catch {
-          // ignore
+        if (rec) {
+          try {
+            rec.status = resp.status;
+            rec.responseBody = await describeResponseBody(resp);
+          } catch {}
         }
         return resp;
       }).catch((err) => {
-        rec.error = (err && err.message) ? err.message : String(err);
+        if (rec) rec.error = (err && err.message) ? err.message : String(err);
         throw err;
       });
     };
@@ -952,15 +940,24 @@
   const origSend = XMLHttpRequest.prototype.send;
 
   XMLHttpRequest.prototype.open = function(method, url) {
-    // Attach record to this XHR instance
-    try {
-      this.__netwatch_rec = createRecord(url, "xhr");
-      this.__netwatch_rec.method = method;
-    } catch {}
+    if (shouldIgnore(url)) {
+      this.__netwatch_ignore = true;
+      this.__netwatch_rec = null;
+    } else {
+      try {
+        this.__netwatch_ignore = false;
+        this.__netwatch_rec = createRecord(url, "xhr");
+        if (this.__netwatch_rec) this.__netwatch_rec.method = method;
+      } catch {
+        this.__netwatch_rec = null;
+      }
+    }
     return origOpen.apply(this, arguments);
   };
 
   XMLHttpRequest.prototype.send = function(body) {
+    if (this.__netwatch_ignore) return origSend.apply(this, arguments);
+
     const rec = this.__netwatch_rec;
 
     (async () => {
@@ -973,13 +970,10 @@
       const done = () => {
         try {
           rec.status = xhr.status;
-
-          // responseType "" or "text" => responseText
           if (!xhr.responseType || xhr.responseType === "text") {
             const txt = xhr.responseText;
             rec.responseBody = (txt && String(txt).length) ? String(txt) : null;
           } else {
-            // Try to stringify other response types
             const r = xhr.response;
             if (r == null) rec.responseBody = null;
             else if (typeof r === "string") rec.responseBody = r || null;
@@ -992,12 +986,11 @@
         }
       };
 
-      // Make sure we only bind once
       if (!xhr.__netwatch_bound) {
         xhr.__netwatch_bound = true;
         xhr.addEventListener("loadend", done);
-        xhr.addEventListener("error", () => { if (rec) rec.error = rec.error || "XHR error"; });
-        xhr.addEventListener("abort", () => { if (rec) rec.error = rec.error || "XHR aborted"; });
+        xhr.addEventListener("error", () => { rec.error = rec.error || "XHR error"; });
+        xhr.addEventListener("abort", () => { rec.error = rec.error || "XHR aborted"; });
       }
     }
 
