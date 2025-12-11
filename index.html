@@ -363,6 +363,32 @@
         console.log("Item ", item, " checked for existing quantity");
         return quantity;
       }
+    
+      // Define analytics functions
+      function analyticsEngagement(e) {
+          // Process engagement data
+          console.log("Engagement data:", e);
+      }
+
+      function analyticsItemClick(e) {
+          // Process item click data
+          console.log("Item click data:", e);
+      }
+
+      function analyticsItemView(e) {
+          // Process item view data
+          console.log("Item view data:", e);
+      }
+
+      function analyticsOpen(e) {
+          // Process open data
+          console.log("Open data:", e);
+      }
+
+      function analyticsFlyerView(e) {
+          // Process flyer view data
+          console.log("Flyer view data:", e);
+      }
 
       // ---------- Rendering ----------
       async function renderStorefrontFromInputs() {
@@ -406,7 +432,15 @@
             accessToken: getQueryParam("accessToken", accessToken),
             merchantId: getQueryParam("merchantId", merchantId),
             merchantNameIdentifier: getQueryParam("merchantNameIdentifier", merchantNameIdentifier),
+            
+            analyticsDelegate: {
+                onEngagement: analyticsEngagement,
+                onItemClick: analyticsItemClick,
+                onItemView: analyticsItemView,
+                onOpen: analyticsOpen,
+                onFlyerView: analyticsFlyerView,
 
+            },
             cartDelegate: {
               getCartOptions: getMerchantCartOptions,
               addToCart: addToMerchantCart,
